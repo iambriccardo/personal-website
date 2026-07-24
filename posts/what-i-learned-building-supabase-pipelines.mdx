@@ -1,0 +1,226 @@
+---
+title: What I Learned Building Supabase Pipelines
+description: Building Supabase Pipelines and its open-source replication engine, Supabase ETL, taught me about correctness, performance, infrastructure, and AI-assisted engineering.
+date: 2026-07-21
+coverAlt: ASCII characters flowing from a dispersed cloud into ordered horizontal data streams on a black background.
+tags:
+  - Engineering
+  - Distributed Systems
+  - Postgres
+  - Replication
+draft: false
+---
+
+Today, we are [launching Supabase Pipelines in public alpha](https://supabase.com/blog/supabase-pipelines-public-alpha). It is a managed product for replicating data from Supabase Postgres into analytical systems, powered by [Supabase ETL](https://github.com/supabase/etl), the open-source Rust engine at its core.
+
+For the past year, my team and I have built both Supabase ETL and Supabase Pipelines. ETL is the replication engine; Pipelines is the managed product that runs it for customers. I was responsible for leading the work across both, and the engine and the product were never separate efforts: each shaped the other.
+
+For the first time in my career, I’ve had the opportunity to help build a product end to end, from an early prototype to production. That makes today a special moment. I’m proud of what we built, and it felt like the right time to [launch this website](/posts/hello-world/) with a piece about work that genuinely matters to me.
+
+When I joined Supabase in May 2025, I started working with the team on an early prototype of what would become Supabase ETL. Over the next year, we rewrote the engine and turned it into the foundation of Supabase Pipelines.
+
+The engine had to move data quickly and correctly, work as both a library and a standalone binary, run well as part of a managed fleet, and remain useful outside Supabase. From a customer’s perspective, each pipeline begins with an *initial sync* of the selected tables, followed by *ongoing replication* of changes to the destination in near real time. Supported source schema changes are applied to the destination too, keeping it aligned as the database evolves.
+
+Building Supabase Pipelines refined how I think about engineering complex systems. Most of these lessons were learned deep inside ETL, but they were also shaped by building and operating Pipelines.
+
+## Decide what is non-negotiable
+
+At the beginning of a project, it is tempting to start with features, interfaces, and architecture diagrams. I now think one of the most important things a team can do is first decide which properties of the system it will not negotiate away.
+
+For ETL, the first was correctness. The engine had to move every change without silently losing data. Low latency mattered, but moving data quickly was worthless if the result could not be trusted. ETL therefore uses persistent replication state and provides at-least-once delivery. If a destination becomes unavailable or the pipeline restarts, replication resumes from an acknowledged position instead of skipping what happened in between. The trade-off is that some events may be delivered again after a restart, so destinations must make their writes idempotent.
+
+The second was performance. This was not a background job that could remain inefficient indefinitely. Moving bytes is at the heart of Pipelines, so throughput, latency, memory use, and operational cost are all part of the product's behavior.
+
+The third was operability. We needed to run a fleet in which individual pipelines could be stopped, moved, upgraded, and restarted without ambiguity. Customers also needed to control a pipeline from the Dashboard and trust that the action would have a predictable effect. A pipeline therefore had to suspend quickly and consistently, then resume from a known position just as reliably. That property was not a deployment detail. It influenced state management, acknowledgments, shutdown, recovery, and the boundaries between components.
+
+Naming these constraints early gave us a way to evaluate designs. A solution could be elegant in isolation and still be wrong for ETL if it weakened recovery, made correctness difficult to establish, or prevented us from operating pipelines efficiently.
+
+**Non-negotiable properties do not tell you the full design. They tell you what every possible design must preserve.**
+
+## Decompose complexity and state your invariants
+
+Postgres logical replication is complex before you add any of your own code. You need to understand the write-ahead log, replication slots, publications, relation metadata, replica identity, transaction boundaries, and the ordering guarantees of the protocol.
+
+The only way I have found to reason about a problem like building ETL is to decompose it into smaller problems and make the assumptions within each one explicit.
+
+For every critical code path, I try to state its invariants. Which message must arrive before another? Which events are part of the same transaction? Can this state transition happen twice? Is a log sequence number (LSN) expected to increase monotonically? What must already be durable before we acknowledge progress to Postgres?
+
+Once those rules are explicit, a piece of the system becomes easier to reason about in isolation. They also give reviewers and future maintainers something more useful than an explanation of what the code happens to do: they explain what must remain true when the code changes.
+
+Rust gives us several ways to encode these rules. When an invariant can live in the type system, it should. Distinct states should be represented by distinct types when doing so makes invalid transitions impossible. The compiler can then reject whole categories of mistakes.
+
+Not every property fits cleanly into a type. Some would make an interface prohibitively verbose. In those cases, assertions and debug assertions are valuable. They turn an assumption written in a comment into something the program can check. If an invariant that we believe to be fundamental stops being true, I would rather find out as close as possible to the place where it was violated.
+
+A simplified check around replication progress might look like this:
+
+```rust
+fn advance_lsn(current: PgLsn, next: PgLsn) -> PgLsn {
+    debug_assert!(next >= current, "replication progress moved backward");
+    next
+}
+```
+
+The example is deliberately small. Its value lies not in the comparison itself, but in the fact that a property we rely on is written next to the transition that could violate it.
+
+This discipline became even more important as AI entered more of my workflow. Types, assertions, tests, and precise comments do more than document the code for people. Together, they make the system's invariants, constraints, and component boundaries explicit enough for both engineers and agents to reason about.
+
+## Generalize only after the problem earns it
+
+Earlier in my career, I tended to generalize problems before I understood them. I would create abstractions for possible futures and solve a larger problem than the one in front of me. Experience has made me more suspicious of that instinct.
+
+Unnecessary generalization creates interfaces around guesses. It distributes complexity across the system before there is evidence that the complexity belongs there. The result often looks flexible but is difficult to understand and even harder to change.
+
+At the same time, some problems genuinely require a more general model. The difficult part is learning to tell the difference.
+
+Schema evolution in ETL was one of those problems. At first, it sounds simple: detect a DDL change in Postgres and apply the equivalent change at the destination. It stops being simple once the system has to be crash-safe, preserve multiple schema versions within batches, work with Postgres features such as publication-level column filtering, and accommodate destinations with different capabilities. Those requirements dramatically increase the complexity of the implementation.
+
+After several iterations, the useful abstraction emerged: separate detecting a schema change from putting it into effect. A source-side event trigger emits a transactional logical message when DDL changes the underlying table schema. That message tells ETL that a new base schema exists, but it does not yet tell the engine exactly which columns the pipeline will receive. A Postgres publication may expose the full table or only a subset of its columns.
+
+ETL therefore waits for the fresh relation message that follows. The relation describes the columns Postgres will actually send. ETL resolves it against the base schema and keeps a *replication mask* in memory: the subset of schema columns actually included in replication. This means ETL only needs to persist the base schema. At runtime, it applies the mask to that schema to derive the replicated schema carried by the stream. The beauty of this approach is that it treats adding a new column to the base schema and enabling an existing column for replication while leaving the underlying schema unchanged in essentially the same way.
+
+The protocol depends on one central invariant: after a schema-change message, Postgres sends fresh relation metadata before any row that uses the new layout. The DDL message detects the new schema; the relation message activates its replication mask and becomes the transition point between the old and new schemas.
+
+<Mermaid
+  title="Schema changes inside the ordered replication event stream."
+  chart={`flowchart LR
+    old["Row with<br/>old schema"] --> ddl["Transactional<br/>DDL message"]
+    ddl --> relation["Relation message<br/>activate new mask"]
+    relation --> next["Row with<br/>new schema"]`}
+  mobileChart={`flowchart TB
+    old["Row with old schema"] --> ddl["Transactional DDL message"]
+    ddl --> relation["Relation message · activate new mask"]
+    relation --> next["Row with new schema"]`}
+/>
+
+**The relation message is the dividing line.** Rows before it belong to the old schema; rows after it belong to the new one. A destination may receive the entire sequence in one batch, so the relation is an event in the stream rather than a batch boundary.
+
+We also chose not to rely on each destination to tell us which schema it currently had. Introspection differs across systems and would make the result depend on what a destination can report. Instead, ETL keeps its own representation of the last schema successfully applied there and compares it with the new replicated schema to produce a deterministic diff. Each destination then decides how to apply the changes it supports. That boundary matters because ETL cannot know which destinations it will support over time or which schema changes they will be able to apply.
+
+This generic approach makes recovery harder. ETL makes no assumption that destination DDL is atomic, so a failure may leave only part of a diff applied. Some destinations can recover by retrying or reconciling the remaining changes; in other cases, ETL cannot safely determine how to continue and must stop for operator intervention.
+
+The versioned schema snapshots are therefore retained for as long as replay or recovery may need them. Only after replication has safely moved beyond those versions can ETL remove them.
+
+The exact behavior and its current limitations are documented in the [schema changes guide](https://supabase.github.io/etl/explanation/schema-changes/). What matters to me about this design is not that it is clever. It is that it generalizes the actual problem across three distinct concerns: detecting a change to the source schema, determining the publication-filtered schema carried by the stream, and giving destinations with different capabilities a consistent way to apply it.
+
+**That abstraction was earned through attempts to solve the concrete problem. We did not begin with it.**
+
+## Start with the simplest solution that has an exit
+
+Ambitious systems invite ambitious implementation choices. It is easy to begin by imagining a custom allocator, lock-free data structures, carefully assigned threads, sophisticated scheduling, or an elaborate internal protocol.
+
+Most of those decisions can wait.
+
+Early in a system's life, the most valuable thing is usually a small, correct foundation that lets you observe real behavior. Once that exists, good tooling and observability can show you which sophisticated ideas are worth their complexity. Before the real bottleneck is known, optimizing a hypothetical bottleneck mostly creates code that is harder to change.
+
+Starting simple does not mean ignoring the future. The important question is whether a simple design has a credible evolution path.
+
+When I make a choice that I know may not be optimal forever, I try to understand how we would replace it. What state would need to migrate? Can old and new versions coexist? Is the boundary narrow enough to change locally? Could the transition happen gradually, or would every customer pipeline need to move at once?
+
+This matters especially when ETL powers a managed fleet. We run many customer pipelines, each deployed independently, so different versions can coexist temporarily.
+
+Getting the first implementation perfect is not a realistic goal. Putting ETL in a position where it can become better is.
+
+## The team writing the system should operate it
+
+At Supabase, my team built both the ETL engine and the managed systems that make Pipelines possible. We also owned the infrastructure beneath them. That experience strengthened my view that the people writing a production system should remain close to its operation.
+
+That can mean engineers operating their own infrastructure or SREs embedded closely within the product team. The organizational shape matters less than avoiding a hard separation between those who make the software and those who experience its behavior in production.
+
+This comes from my belief that good engineering requires strong ownership. You cannot fully own a system if your understanding ends at the application boundary. Ownership means remaining accountable for the system beyond the code: understanding where it runs, how it is deployed, how it behaves and fails, and making sure it can be recovered. It is very easy to make a code change, click the deploy button, and consider the work finished. I had seen how easily this pattern could emerge, and I wanted to avoid it in my own team. **A deployment transfers code into production; it does not transfer responsibility to somebody else.**
+
+When application engineers can walk away from the operational consequences of their changes, SREs may be left to investigate systems they did not design and problems they did not introduce. That is an ineffective model and unfair to the people carrying the burden. Infrastructure is part of the product's design: scheduling, resource limits, deployment, recovery, networking, observability, and incident response all feed back into the application. Keeping that knowledge within the team shortens the learning loop. Operational pain becomes design input instead of a ticket passed across an organizational boundary. Strong ownership is therefore not only an individual quality. It is also a consequence of how the team is structured and where responsibility is allowed to stop.
+
+## Know the hardware beneath the abstractions
+
+Operating Pipelines ourselves forced us to look below the application boundary. Every application eventually runs on hardware, no matter how many layers sit between the code and the machine. For systems where performance and cost matter, not knowing that hardware means not fully knowing the system.
+
+You should be able to describe the workload's profile. Is it limited primarily by CPU, memory, storage, or network I/O? Where is time spent? Which resource becomes scarce first as throughput rises? How does that change during the initial sync compared with ongoing replication?
+
+ETL moves data between systems, so much of its critical path is I/O-bound. CPU efficiency is still important because moving data requires continuously decoding it from Postgres and encoding it for the destination. We therefore optimize ETL along both axes. End-to-end throughput is still bounded by the slowest part of the system, which may be I/O or CPU. In practice, we found that the bottleneck shifts depending on the machine types we use, the deployment topology, and the workload.
+
+That understanding influenced the machines we chose. Each customer pipeline runs as a single process, which we call a *replicator instance*. These instances needed a balanced amount of CPU and memory, together with strong network performance. Other supporting services had different profiles and benefited from memory-optimized machines. Choosing one instance family for everything would have been simpler, but it would have wasted capacity and made bin packing less efficient.
+
+It also influenced where we optimized. We benchmarked and profiled continuously, paying attention to the entire data path rather than isolated functions. For I/O-heavy paths, meaningful improvements come from better connection utilization, parallelizing independent work, batching more effectively, applying backpressure, and keeping communication channels full enough for bytes to move efficiently. For CPU-heavy paths, they come from better algorithms, fewer allocations, and avoiding unnecessary data copies. The [ETL architecture](https://supabase.github.io/etl/explanation/architecture/) shows how these performance improvements translated into concrete design decisions.
+
+Performance work should begin with a model of the system, then be corrected by measurements. Without both, it is easy to make one component impressively fast while the product remains exactly as slow as before.
+
+## Testing is what lets a team move fast
+
+Understanding the workload was only half of operating it safely. For a replication system, correctness failures can be quiet. A pipeline can look healthy while dropping one event under a rare interleaving. A restart can replay a batch and, if idempotency is handled incorrectly, silently introduce duplicates into a destination that may contain millions of rows. A schema change can be applied after rows that depend on it. These bugs are difficult to notice and expensive to reconstruct from production.
+
+I spent a considerable amount of time building the first version of the ETL test suite because reliable tests are not in conflict with speed. They are what make speed sustainable.
+
+Our most important tests use the real boundaries of the system wherever practical. The source is a real Postgres instance, not a mock that approximates the logical replication protocol. We use a simple in-memory destination to observe what the engine produces, while tests that need destination behavior run against real destination systems. Most of the important suite therefore consists of integration tests, complemented by focused unit tests for smaller pieces of logic.
+
+We tried to avoid mocks because a mock is another implementation of the behavior you think the dependency has. It can agree perfectly with your assumptions while the real system does something else. Sometimes a fake is still the right trade-off for performance or fault control, but it should be a conscious boundary, not the default way to make a test convenient.
+
+Ordinary integration tests are not enough for concurrent code. Many failures require an exact interleaving that a fast local run may almost never produce. We added fault-injection points that let tests pause or fail the engine at specific moments, advance another part of the system, and then resume execution. A test can, for example, make a worker crash after data has been written to the destination but before the corresponding LSN has been acknowledged. Controlling failure timing this precisely lets us reproduce all kinds of failure modes and interleavings that would otherwise require luck, precise timing, or production traffic.
+
+Alongside the unit and integration suites, we also built a continuously running simulation system that behaves like a canary. It creates and changes source data while repeatedly starting, stopping, restarting, and resetting pipelines, deliberately pushing lifecycle operations far beyond ordinary use. After each sequence, it checks the resulting source, pipeline, and destination states against the invariants we expect to hold. Unlike a test built around one known interleaving, the simulation explores combinations over time and gives us a chance to find failures we did not know to encode in advance.
+
+We are still expanding this system. An important part of that work is introducing network latency, interruptions, and other forms of chaos between components. A replication engine should not be correct only when every dependency is fast and available. It should preserve its guarantees when communication is slow, responses are delayed, connections disappear, and recovery happens at inconvenient moments.
+
+**The goal is not to test every line for its own sake. It is to build enough confidence that the team can change the system without being afraid of it.**
+
+## Observability should explain the system
+
+Tests give us confidence in the cases we can exercise before deployment. Observability has to help explain everything that happens afterward. My years at Sentry probably made me biased, but I see that visibility as part of a system's interface: a production service should be able to explain what it is doing.
+
+Good observability helps debug incidents, spot performance regressions, compare deployments, understand customer behavior, and verify that an optimization worked outside a benchmark. More importantly, it makes alerting more precise because signals can be interpreted together. With agents, having many useful signals has become even more valuable: they can assemble a picture of what is happening in minutes, whereas the same investigation might have taken hours even a year ago.
+
+Observability can also be a significant feature for customers. Pipelines exposes progress and health through the Dashboard so customers can understand whether a pipeline is healthy, distinguish normal catch-up from a stalled system, and investigate problems without having to ask the team operating it. That customer-facing view depends on the same throughput, lag, and failure signals we use to operate the fleet.
+
+Imagine that CPU pressure increases on a replicator instance. In isolation, that might look like a problem. If the incoming message rate increased at the same time, the CPU may simply be doing the work we asked of it. If replication lag is also rising, the system may no longer be keeping up. If WAL generation spiked sharply at the source, the lag may be a temporary consequence of a customer import or traffic burst rather than a regression in our code.
+
+No single metric tells that story. Incoming events, bytes, batch sizes, destination latency, retries, CPU, memory, and replication lag describe different parts of the same flow. Cross-correlating them makes it possible to distinguish healthy load from saturation and a customer-side burst from a bad deployment.
+
+The objective is not to collect every possible measurement. It is to make the important state transitions and bottlenecks legible. If the team cannot answer where a pipeline is spending time, why it is behind, or whether it is making progress, it does not yet have enough visibility into the product it operates.
+
+## AI changed how I build
+
+The same foundations that made ETL easier for people to operate and change also made it a better environment for AI. I have used AI in my work since ChatGPT appeared in 2022. At the time, many people around me were skeptical. Some thought using it would make engineers less capable; others dismissed it as a dumb pattern matcher. I always believed our work was going to change, although I did not yet know how quickly.
+
+We built ETL during a period when coding agents were improving dramatically. Early on, I was reverse-engineering Postgres behavior by hand and reading through thousands of lines of its C source code. This gave me a deeper respect for the people who built such a remarkable system. As the engine matured, something interesting happened: I knew ETL deeply, its architecture had become cleaner, and its behavior was increasingly encoded in types, tests, assertions, and documentation. Rust's explicit syntax helped too, making more of the program's intent and constraints visible in the code and easier for agents to reason about. Together, these qualities made ETL an unusually good environment for agents.
+
+In the months leading up to launch, I reached a point where I was rarely typing implementation code myself. That does not mean ETL was built by asking an agent to invent a system from a vague prompt. The opposite is true. Agents became effective because ETL already had strong foundations and because I could give precise direction about the behavior I wanted.
+
+**The biggest change was not raw implementation speed. It was debugging.**
+
+Schema-change support produced one of the clearest examples. I had added a Postgres DDL event trigger that emitted a transactional logical message into the WAL. Its ordering relative to relation metadata and row events was the invariant described earlier: a schema-change message had to be followed by the correct relation before any row using the new layout. In December 2025, I spent a day testing combinations of writes and examining their WAL behavior, but one strange interleaving remained difficult to explain. I paused the work to focus on other priorities and returned to it a few months later, by which time the models had improved again.
+
+I gave an agent a minimal reproduction and asked it to investigate deeply. It inspected the WAL bytes and traced the behavior into Postgres. The problem involved exception handling inside a PL/pgSQL block, following this general shape:
+
+```sql
+BEGIN
+    -- Inspect the DDL and emit a logical message.
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Recover from an unsupported case.
+END;
+```
+
+The underlying Postgres behavior is documented, although it is easy to miss. [A PL/pgSQL block with an exception handler forms a subtransaction](https://www.postgresql.org/docs/current/plpgsql-transactions.html), while a [transactional logical message becomes part of the current transaction](https://www.postgresql.org/docs/current/functions-admin.html#FUNCTIONS-REPLICATION). That meant the exception-handling structure was also part of the transaction structure. In our reproduction, the additional subtransaction boundary caused the decoded events to violate the ordering invariant of the schema-change algorithm.
+
+This is the kind of problem that might previously have taken me days. The agent knew where to look in the Postgres implementation, could inspect low-level evidence without getting tired, and could connect behavior across layers. I still reviewed the code, worked through the reasoning myself, cross-checked the explanation against the Postgres source and documentation, and tested the resulting fix, which restored the expected ordering. In doing so, I learned more about Postgres than I would have if I had treated the answer as a black box.
+
+That distinction matters. AI is most useful to me when I understand the objective and the system well enough to constrain it. It can explore, implement, refactor, and debug at extraordinary speed, but I remain responsible for the model of the system and for deciding whether the result is correct.
+
+This creates an open question for engineering teams. For an engineer new to ETL, an agent can easily become a way to make changes without first building a mental model of logical replication or the codebase. I could prompt precisely because I had built ETL and knew it inside out; somebody new could receive a plausible solution while lacking the context to challenge it.
+
+I do not think the answer is to prevent new engineers from using AI. I would rather use it to help them understand ETL: to trace an event end to end, explain why an invariant exists, and point them toward the code and tests that establish a guarantee. Sometimes implementing something by hand may still be a useful exercise. We are still learning how to onboard people into codebases that are increasingly developed with agents, but **productivity cannot replace understanding**. A codebase must be hospitable to reasoning, regardless of whether the reader is a person or a model.
+
+## Building a product on an open-source engine
+
+There is still a great deal to build, and I am still learning, but helping take Pipelines from an early prototype through production has already changed me as an engineer. Much of that journey was spent deep inside ETL, but seeing Pipelines launch makes clear why the engine work mattered: it is now part of a product that people outside the team can use.
+
+I did not do it alone. My teammates are phenomenal engineers, and they continue to teach me things. Everything described here came from the work of a team: discussing designs, disagreeing, operating Pipelines, investigating failures, and refining ETL together. Leading work across the engine, infrastructure, testing, and operations made the experience unusually formative for me, but both ETL and Pipelines are things we accomplished together.
+
+From the beginning, solving the business problem through Pipelines was the first priority. Open source was a very close second. We wanted ETL to be more than the hidden implementation of a managed product. We wanted it to be a useful Rust library with understandable interfaces, explicit contracts, good documentation, and building blocks that other people could extend. ETL is itself built on open-source technologies; without them, none of this work would have been possible.
+
+Over time, people reached out to show me what they had built with ETL, and I learned that companies were using the open-source engine as part of their own data pipelines. Hearing that was one of the most rewarding parts of the project.
+
+Building a good open-source interface takes iteration. Naming, contracts, and documentation matter because you cannot rely on internal context to explain a confusing abstraction. AI gave me more time to refine those details than I would otherwise have had, and I am grateful for that.
+
+Almost everything we build rests on work that other people chose to share. Contributing something back feels like a gesture of appreciation, but it also makes the work more meaningful to me. At both Sentry and Supabase, I became used to building in public and seeing other people use what I helped create. That makes creation an act of sharing.
+
+I care about my career, but prestige is not what made this project special. I care that we built a technically difficult project and made both its open-source engine and managed product useful to other people. Maybe that is idealistic, but it is how I want to work: building things I love with people I respect and sharing them with people who find them useful. For me, purpose is the part that lasts.

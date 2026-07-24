@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="msapplication-TileColor" content="#000000" />
+    <meta name="msapplication-TileImage" content="/mstile-144x144.png" />
+    <meta name="description" content="Riccardo Busetti is a Vienna-based software engineer focused on distributed systems, databases, and data infrastructure." />
+    <meta name="author" content="Riccardo Busetti" />
+    <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large" />
+
+    <link rel="canonical" href="https://riccardobusetti.me/" />
+    <link rel="sitemap" type="application/xml" href="/sitemap.xml" />
+    <link rel="alternate" type="application/rss+xml" title="Riccardo Busetti — Posts" href="https://riccardobusetti.me/rss.xml" />
+    <link rel="me" href="https://github.com/iambriccardo" />
+    <link rel="me" href="https://www.linkedin.com/in/iambriccardo" />
+    <link rel="me" href="https://x.com/iambriccardo" />
+
+    <meta property="og:title" content="Riccardo Busetti" />
+    <meta property="og:description" content="Riccardo Busetti is a Vienna-based software engineer focused on distributed systems, databases, and data infrastructure." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://riccardobusetti.me/" />
+    <meta property="og:site_name" content="Riccardo Busetti" />
+    <meta property="og:image" content="https://riccardobusetti.me/site-social-card.jpg" />
+    <meta property="og:image:secure_url" content="https://riccardobusetti.me/site-social-card.jpg" />
+    <meta property="og:image:type" content="image/jpeg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="A flowing three-dimensional landscape made from white ASCII characters on a black background." />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@iambriccardo" />
+    <meta name="twitter:creator" content="@iambriccardo" />
+    <meta name="twitter:url" content="https://riccardobusetti.me/" />
+    <meta name="twitter:title" content="Riccardo Busetti" />
+    <meta name="twitter:description" content="Riccardo Busetti is a Vienna-based software engineer focused on distributed systems, databases, and data infrastructure." />
+    <meta name="twitter:image" content="https://riccardobusetti.me/site-social-card.jpg" />
+    <meta name="twitter:image:alt" content="A flowing three-dimensional landscape made from white ASCII characters on a black background." />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://riccardobusetti.me/#website",
+            "url": "https://riccardobusetti.me/",
+            "name": "Riccardo Busetti",
+            "alternateName": "riccardobusetti.me",
+            "description": "Riccardo Busetti is a Vienna-based software engineer focused on distributed systems, databases, and data infrastructure.",
+            "inLanguage": "en"
+          },
+          {
+            "@type": "ProfilePage",
+            "@id": "https://riccardobusetti.me/#profile",
+            "url": "https://riccardobusetti.me/",
+            "name": "Riccardo Busetti",
+            "isPartOf": { "@id": "https://riccardobusetti.me/#website" },
+            "mainEntity": { "@id": "https://riccardobusetti.me/#person" }
+          },
+          {
+            "@type": "Person",
+            "@id": "https://riccardobusetti.me/#person",
+            "name": "Riccardo Busetti",
+            "alternateName": "iambriccardo",
+            "url": "https://riccardobusetti.me/",
+            "jobTitle": "Software Engineer",
+            "description": "Riccardo Busetti is a Vienna-based software engineer focused on distributed systems, databases, and data infrastructure.",
+            "knowsAbout": [
+              "Distributed systems",
+              "Databases",
+              "Data infrastructure"
+            ],
+            "worksFor": {
+              "@type": "Organization",
+              "name": "Supabase",
+              "url": "https://supabase.com/"
+            },
+            "sameAs": [
+              "https://github.com/iambriccardo",
+              "https://www.linkedin.com/in/iambriccardo",
+              "https://x.com/iambriccardo"
+            ]
+          }
+        ]
+      }
+    </script>
+
+    <link id="site-favicon-ico" rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" type="image/x-icon" />
+    <link id="site-favicon-32" rel="icon" href="/favicon-32x32.png" sizes="32x32" type="image/png" />
+    <link id="site-favicon-16" rel="icon" href="/favicon-16x16.png" sizes="16x16" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <script>
+      // Production pages include crawlable fallback content inside #root. Hide
+      // it before the body can paint when JavaScript will replace it, while
+      // keeping it visible for crawlers and visitors without JavaScript.
+      document.documentElement.classList.add('has-js')
+
+      var initialTheme = 'dark'
+
+      try {
+        var savedTheme = localStorage.getItem('rb-theme')
+        var hasThemeOverride = localStorage.getItem('rb-theme-user-set') === 'true'
+        var hasValidSavedTheme = savedTheme === 'dark' || savedTheme === 'light'
+
+        // Older builds wrote rb-theme automatically, so only the explicit
+        // marker proves that the visitor intentionally chose a theme.
+        if (hasValidSavedTheme && hasThemeOverride) initialTheme = savedTheme
+      } catch (e) {}
+
+      var initialThemeIsDark = initialTheme === 'dark'
+      document.documentElement.dataset.theme = initialTheme
+      document.querySelector('meta[name="theme-color"]').content = initialThemeIsDark
+        ? '#000000'
+        : '#ffffff'
+      document.querySelector('#site-favicon-ico').href = initialThemeIsDark
+        ? '/favicon.ico'
+        : '/favicon-white.ico'
+      document.querySelector('#site-favicon-32').href = initialThemeIsDark
+        ? '/favicon-32x32.png'
+        : '/favicon-white-32x32.png'
+      document.querySelector('#site-favicon-16').href = initialThemeIsDark
+        ? '/favicon-16x16.png'
+        : '/favicon-white-16x16.png'
+    </script>
+    <style>
+      html { background: #000000 }
+      html[data-theme='light'] { background: #ffffff }
+      html.has-js .seo-fallback { visibility: hidden }
+    </style>
+    <title>Riccardo Busetti</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

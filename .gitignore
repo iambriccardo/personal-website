@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Local environment files (keep templates)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Test and coverage output
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+blob-report/
+
+# Local browser tooling artifacts
+.playwright-cli/
+output/playwright/
+
+# Tool caches
+.vite/
+.cache/
+.eslintcache
+
+# Temporary files
+tmp/
+temp/
+*.swp
+*.swo
+
+# Local editor and assistant settings
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.claude/settings.local.json
+
+# Operating system metadata
+.DS_Store
+Thumbs.db
